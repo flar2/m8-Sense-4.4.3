@@ -345,6 +345,7 @@ struct qpnp_chg_chip {
 	bool				btc_disabled;
 	bool				use_default_batt_values;
 	bool				duty_cycle_100p;
+	bool				aicl_settled;
 	bool				enable_qct_adjust_vddmax;
 	unsigned int			bpd_detection;
 	unsigned int			max_bat_chg_current;
@@ -589,6 +590,7 @@ static int get_prop_batt_present(struct qpnp_chg_chip *chip);
 int pm8941_get_chgr_fsm_state(struct qpnp_chg_chip *chip);
 static int qpnp_chg_is_batt_temp_ok(struct qpnp_chg_chip *chip);
 static bool vddmax_modify = false;
+static int qpnp_chg_get_vusbin_uv(struct qpnp_chg_chip *chip);
 
 static bool flag_enable_bms_charger_log;
 #define BATT_LOG_BUF_LEN (1024)
@@ -628,6 +630,7 @@ static void qpnp_chg_set_appropriate_battery_current(struct qpnp_chg_chip *chip)
 static bool is_usb_target_ma_changed_by_qc20 = false;
 
 static int qpnp_chg_vddmax_set(struct qpnp_chg_chip *chip, int voltage);
+static int qpnp_chg_input_current_settled(struct qpnp_chg_chip *chip);
 static void qpnp_chg_set_appropriate_vddmax(struct qpnp_chg_chip *chip);
 static void
 qpnp_chg_set_appropriate_battery_current(struct qpnp_chg_chip *chip);
@@ -1944,6 +1947,7 @@ qpnp_batt_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 	case POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_MAX:
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 	case POWER_SUPPLY_PROP_COOL_TEMP:
 	case POWER_SUPPLY_PROP_WARM_TEMP:
@@ -2112,6 +2116,7 @@ static enum power_supply_property msm_batt_power_props[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_MAX,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN,
 	POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
@@ -2636,6 +2641,9 @@ qpnp_batt_power_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_MAX:
 		val->intval = qpnp_chg_usb_iusbmax_get(chip) * 1000;
 		break;
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
+		val->intval = chip->aicl_settled;
+		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 		val->intval = qpnp_chg_vinmin_get(chip) * 1000;
 		break;
@@ -2793,19 +2801,31 @@ int pm8941_is_pwr_src_plugged_in(void)
 	return FALSE;
 }
 
+#define QC20_9_VOLT_CHECK			(8000000)
+#define QC20_VIN_MIN_MV				(8200)
 int adjust_chg_vin_min(struct qpnp_chg_chip *chip,
 				int only_increased)
 {
 	int rc = 0, vbat_mv, ori_vin_min, target_vin_min;
+	int usbin = 0;
 
 	vbat_mv = get_prop_battery_voltage_now(chip)/1000;
 	target_vin_min = ori_vin_min = qpnp_chg_vinmin_get(chip);
+	usbin = qpnp_chg_get_vusbin_uv(chip);
 
-	if (vbat_mv >= chip->regulate_vin_min_thr_mv)
-		target_vin_min = VIN_MIN_4400_MV;
-	else {
-		if (!only_increased)
+	if(usbin > QC20_9_VOLT_CHECK && htc_battery_is_support_qc20()
+			&& !is_batt_full_eoc_stop){
+		target_vin_min = QC20_VIN_MIN_MV;
+	} else {
+		if(ori_vin_min == QC20_VIN_MIN_MV)
 			target_vin_min = chip->lower_vin_min;
+
+		if (vbat_mv >= chip->regulate_vin_min_thr_mv)
+			target_vin_min = VIN_MIN_4400_MV;
+		else {
+			if (!only_increased)
+				target_vin_min = chip->lower_vin_min;
+		}
 	}
 
 	if (target_vin_min != ori_vin_min) {
@@ -2915,8 +2935,6 @@ static void vin_collapse_check_worker(struct work_struct *work)
 #define RETRY_AICL_TIME				(300000)
 #define VIN_MIN_DETECT_DURATION_MS		(1500)
 #define AICL_CHECK_WAIT_PERIOD_MS 		(200)
-#define QC20_9_VOLT_CHECK			(8000000)
-#define QC20_VIN_MIN_MV				(8200)
 static void retry_aicl_mechanism(struct qpnp_chg_chip *chip)
 {
 	unsigned long time_since_last_update_ms, cur_jiffies;
@@ -3466,6 +3484,7 @@ static void handle_usb_present_change(struct qpnp_chg_chip *chip,
 			vddmax_modify = false;
 			chip->chg_done = false;
 			chip->prev_usb_max_ma = -EINVAL;
+			chip->aicl_settled = false;
 			chip->delta_vddmax_mv = 0;
 			qpnp_chg_set_appropriate_vddmax(chip);
 			hsml_target_ma = 0;
@@ -3733,6 +3752,15 @@ int pm8941_set_chg_iusbmax(int val)
 	return qpnp_chg_iusbmax_set(the_chip, val);
 }
 
+int pm8941_set_chg_curr_settled(int val)
+{
+	if (!the_chip) {
+		pr_err("%s: called before init\n", __func__);
+		return -EINVAL;
+	}
+	return qpnp_chg_input_current_settled(the_chip);
+}
+
 int pm8941_set_chg_vin_min(int val)
 {
 	if (!the_chip) {
@@ -3935,6 +3963,19 @@ int pm8941_get_chg_usb_iusbmax(void)
 		return -EINVAL;
 	}
 	return (qpnp_chg_usb_iusbmax_get(the_chip)*1000);
+}
+
+int pm8941_get_chg_curr_settled(void)
+{
+	if (!the_chip) {
+		pr_err("%s: called before init\n", __func__);
+		return -EINVAL;
+	}
+#if 0
+	return the_chip->aicl_settled;
+#else
+	return 1;
+#endif
 }
 
 int pm8941_get_chg_vinmin(void)
@@ -5173,6 +5214,99 @@ qpnp_chg_vddmax_set(struct qpnp_chg_chip *chip, int voltage)
 	return qpnp_chg_write(chip, &temp, chip->chgr_base + CHGR_VDD_MAX, 1);
 }
 
+static int
+qpnp_chg_input_current_settled(struct qpnp_chg_chip *chip)
+{
+#if !(defined(CONFIG_HTC_BATT_8960))
+	int rc, ibat_max_ma;
+	u8 reg, chgr_sts, ibat_trim, i;
+
+	chip->aicl_settled = true;
+
+	if (!chip->ibat_calibration_enabled)
+		return 0;
+
+	if (chip->type != SMBB)
+		return 0;
+
+	rc = qpnp_chg_read(chip, &reg,
+			chip->buck_base + BUCK_CTRL_TRIM3, 1);
+	if (rc) {
+		pr_err("failed to read BUCK_CTRL_TRIM3 rc=%d\n", rc);
+		return rc;
+	}
+	if (reg & IBAT_TRIM_GOOD_BIT) {
+		pr_debug("IBAT_TRIM_GOOD bit already set. Quitting!\n");
+		return 0;
+	}
+	ibat_trim = reg & IBAT_TRIM_OFFSET_MASK;
+
+	if (!is_within_range(ibat_trim, IBAT_TRIM_LOW_LIM,
+					IBAT_TRIM_HIGH_LIM)) {
+		pr_debug("Improper ibat_trim value=%x setting to value=%x\n",
+						ibat_trim, IBAT_TRIM_MEAN);
+		ibat_trim = IBAT_TRIM_MEAN;
+		rc = qpnp_chg_masked_write(chip,
+				chip->buck_base + BUCK_CTRL_TRIM3,
+				IBAT_TRIM_OFFSET_MASK, ibat_trim, 1);
+		if (rc) {
+			pr_err("failed to set ibat_trim to %x rc=%d\n",
+						IBAT_TRIM_MEAN, rc);
+			return rc;
+		}
+	}
+
+	rc = qpnp_chg_read(chip, &chgr_sts,
+				INT_RT_STS(chip->chgr_base), 1);
+	if (rc) {
+		pr_err("failed to read interrupt sts rc=%d\n", rc);
+		return rc;
+	}
+	if (!(chgr_sts & FAST_CHG_ON_IRQ)) {
+		pr_debug("Not in fastchg\n");
+		return rc;
+	}
+
+	
+	rc = qpnp_chg_ibatmax_get(chip, &ibat_max_ma);
+	if (rc) {
+		pr_debug("failed to save ibatmax rc=%d\n", rc);
+		return rc;
+	}
+
+	rc = qpnp_chg_ibatmax_set(chip, IBAT_TRIM_TGT_MA);
+	if (rc) {
+		pr_err("failed to set ibatmax rc=%d\n", rc);
+		return rc;
+	}
+
+	for (i = 0; i < 3; i++) {
+		msleep(20);
+		if (qpnp_chg_is_ibat_loop_active(chip))
+			qpnp_chg_trim_ibat(chip, ibat_trim);
+		else
+			pr_debug("ibat loop not active\n");
+
+		
+		rc = qpnp_chg_read(chip, &ibat_trim,
+			chip->buck_base + BUCK_CTRL_TRIM3, 1);
+		if (rc) {
+			pr_err("failed to read BUCK_CTRL_TRIM3 rc=%d\n", rc);
+			break;
+		}
+	}
+
+	
+	rc = qpnp_chg_ibatmax_set(chip, ibat_max_ma);
+	if (rc)
+		pr_err("failed to restore ibatmax rc=%d\n", rc);
+
+	return rc;
+#else
+	return 0;
+#endif 
+}
+
 #define BOOST_MIN_UV	4200000
 #define BOOST_MAX_UV	5500000
 #define BOOST_STEP_UV	50000
@@ -5730,8 +5864,7 @@ qpnp_eoc_work(struct work_struct *work)
 
 		
 		if (chip->regulate_vin_min_thr_mv
-				&& chip->lower_vin_min
-				&& !htc_battery_is_support_qc20())
+				&& chip->lower_vin_min)
 			adjust_chg_vin_min(chip, 1);
 
 		if (!(buck_sts & VDD_LOOP_IRQ)) {
@@ -5756,14 +5889,6 @@ qpnp_eoc_work(struct work_struct *work)
 #if (defined(CONFIG_HTC_BATT_8960))
 				if (chip->enable_qct_adjust_vddmax)
 					qpnp_chg_adjust_vddmax(chip, vbat_mv);
-				
-				if (htc_battery_is_support_qc20()) {
-					if (chip->regulate_vin_min_thr_mv
-							&& chip->lower_vin_min)
-						adjust_chg_vin_min(chip, 1);
-					else
-						qpnp_chg_vinmin_set(chip, chip->min_voltage_mv);
-				}
 #endif
 				htc_gauge_event_notify(HTC_GAUGE_EVENT_EOC);
 			}
@@ -5776,6 +5901,14 @@ qpnp_eoc_work(struct work_struct *work)
 				
 				chip->chg_done = true;
 				is_batt_full_eoc_stop = true;
+				
+				if (htc_battery_is_support_qc20()) {
+					if (chip->regulate_vin_min_thr_mv
+							&& chip->lower_vin_min)
+						adjust_chg_vin_min(chip, 1);
+					else
+						qpnp_chg_vinmin_set(chip, chip->min_voltage_mv);
+				}
 				qpnp_chg_set_appropriate_vbatdet(chip);
 
 #if !(defined(CONFIG_HTC_BATT_8960))
@@ -6070,6 +6203,9 @@ qpnp_batt_power_set_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_MAX:
 		qpnp_chg_iusbmax_set(chip, val->intval / 1000);
+		break;
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
+		qpnp_chg_input_current_settled(chip);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 		qpnp_chg_vinmin_set(chip, val->intval / 1000);

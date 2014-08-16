@@ -1320,6 +1320,12 @@ static int htc_batt_get_chg_status(enum power_supply_property psp)
 			return htc_batt_info.icharger->get_chg_usb_iusbmax();
 		else
 			break;
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
+		if (htc_batt_info.icharger &&
+				htc_batt_info.icharger->get_chg_curr_settled)
+			return htc_batt_info.icharger->get_chg_curr_settled();
+		else
+			break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 		if (htc_batt_info.icharger &&
 				htc_batt_info.icharger->get_chg_vinmin)
@@ -1347,6 +1353,12 @@ htc_batt_set_chg_property(enum power_supply_property psp, int val)
 		if (htc_batt_info.icharger &&
 				htc_batt_info.icharger->set_chg_iusbmax)
 			return htc_batt_info.icharger->set_chg_iusbmax(val);
+		else
+			break;
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
+		if (htc_batt_info.icharger &&
+				htc_batt_info.icharger->set_chg_curr_settled)
+			return htc_batt_info.icharger->set_chg_curr_settled(val);
 		else
 			break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:

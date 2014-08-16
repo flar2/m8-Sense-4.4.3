@@ -58,6 +58,9 @@ static int htc_power_usb_set_property(struct power_supply *psy,
 				  enum power_supply_property psp,
 				  const union power_supply_propval *val);
 
+static int htc_battery_property_is_writeable(struct power_supply *psy,
+				enum power_supply_property psp);
+
 static int htc_power_property_is_writeable(struct power_supply *psy,
 				enum power_supply_property psp);
 
@@ -123,6 +126,7 @@ static enum power_supply_property htc_battery_properties[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_OVERLOAD,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_MAX,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN,
 	POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION,
 	POWER_SUPPLY_PROP_USB_OVERHEAT,
@@ -148,6 +152,7 @@ static struct power_supply htc_power_supplies[] = {
 		.num_properties = ARRAY_SIZE(htc_battery_properties),
 		.get_property = htc_battery_get_property,
 		.set_property = htc_battery_set_property,
+		.property_is_writeable = htc_battery_property_is_writeable,
 	},
 
 	{
@@ -741,9 +746,21 @@ static int htc_battery_set_property(struct power_supply *psy,
 	switch (psp) {
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_MAX:
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
+#if 0
 		if (battery_core_info.func.func_set_chg_property)
 			ret = battery_core_info.func.func_set_chg_property(psp,
 				val->intval / 1000);
+		else {
+			pr_info("%s: function doesn't exist! psp=%d\n", __func__, psp);
+			return ret;
+		}
+		break;
+#else
+		return ret;
+#endif
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
+		if (battery_core_info.func.func_set_chg_property)
+			ret = battery_core_info.func.func_set_chg_property(psp, val->intval);
 		else {
 			pr_info("%s: function doesn't exist! psp=%d\n", __func__, psp);
 			return ret;
@@ -793,6 +810,7 @@ static int htc_battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_MAX:
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION:
 		if (battery_core_info.func.func_get_chg_status) {
@@ -909,6 +927,21 @@ static int htc_power_usb_set_property(struct power_supply *psy,
 	}
 
 	power_supply_changed(&htc_power_supplies[USB_SUPPLY]);
+	return 0;
+}
+
+static int htc_battery_property_is_writeable(struct power_supply *psy,
+				enum power_supply_property psp)
+{
+	switch (psp) {
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_MAX:
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
+	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
+		return 1;
+	default:
+		break;
+	}
+
 	return 0;
 }
 

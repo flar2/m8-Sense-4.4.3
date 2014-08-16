@@ -90,6 +90,7 @@ struct htc_charger {
 #endif
 	int (*set_limit_input_current)(bool enable, int reason);
 	int (*set_chg_iusbmax)(int val);
+	int (*set_chg_curr_settled)(int val);
 	int (*set_chg_vin_min)(int val);
 	int (*toggle_charger)(void);
 	int (*is_ovp)(int *result);
@@ -106,6 +107,7 @@ struct htc_charger {
 	int (*is_battery_full_eoc_stop)(int *result);
 	int (*get_charge_type)(void);
 	int (*get_chg_usb_iusbmax)(void);
+	int (*get_chg_curr_settled)(void);
 	int (*get_chg_vinmin)(void);
 	int (*get_input_voltage_regulation)(void);
 	int (*store_battery_charger_data)(void);
