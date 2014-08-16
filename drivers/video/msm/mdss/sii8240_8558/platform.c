@@ -87,6 +87,8 @@ bool	input_dev_ucp   = 1;
 int	gpio_index      = -1;
 bool	push_pull_8240  = 0;
 static bool reset_on_exit = 1;  
+bool ap_hdcp_success = false;
+EXPORT_SYMBOL(ap_hdcp_success);
 
 module_param(allow_d3,		bool, S_IRUGO);
 module_param(transcode_mode,	bool, S_IRUGO);
@@ -1032,6 +1034,7 @@ void enable_hdmi(int enable)
 		drv_info.hdmi_mhl_ops->set_upstream_hpd(drv_info.hdmi_pdev, enable);
 		gpio_set_value(drv_info.dpdn_pin, enable);
 	}
+	ap_hdcp_success = false;
 }
 
 static int __devinit si_8240_8558_mhl_tx_i2c_probe(struct i2c_client *client,
